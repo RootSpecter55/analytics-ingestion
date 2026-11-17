@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: analytics
+    ports:
+      - '${POSTGRES_HOST_PORT:-5450}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U app -d analytics']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    # Append-only file: events waiting in the stream survive a Redis restart.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_HOST_PORT:-6384}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redisdata:/data
+
+  # One-off job: applies migrations, then exits.
+  migrate:
+    build: .
+    command: ['alembic', 'upgrade', 'head']
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/analytics
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/analytics
+      REDIS_URL: redis://redis:6379/0
+      SECRETS_SOURCE: local
+      LOCAL_DATA_DIR: /app/data/lake
+    ports:
+      - '${API_HOST_PORT:-8000}:8000'
+    volumes:
+      - lake:/app/data/lake
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # Same image, second entrypoint: moves events from the Redis stream into Parquet files.
+  flusher:
+    build: .
+    command: ['python', '-m', 'scripts.start_with_secrets', 'flusher']
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/analytics
+      REDIS_URL: redis://redis:6379/0
+      SECRETS_SOURCE: local
+      LOCAL_DATA_DIR: /app/data/lake
+    volumes:
+      - lake:/app/data/lake
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  lake:
