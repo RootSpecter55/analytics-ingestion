@@ -7,6 +7,8 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from app.core.db import Base
 
+OrderBy = InstrumentedAttribute[Any] | ColumnElement[Any]
+
 
 class BaseRepository[ModelT: Base]:
     """Repository pattern: generic data access shared by every module.
@@ -33,13 +35,14 @@ class BaseRepository[ModelT: Base]:
         self,
         session: AsyncSession,
         *where: ColumnElement[bool],
-        order_by: InstrumentedAttribute[Any] | ColumnElement[Any],
+        order_by: OrderBy | tuple[OrderBy, ...],
         offset: int,
         limit: int,
     ) -> tuple[list[ModelT], int]:
         """One page of rows matching `where`, plus the total count."""
+        ordering = order_by if isinstance(order_by, tuple) else (order_by,)
         rows = await session.scalars(
-            select(self.model).where(*where).order_by(order_by).offset(offset).limit(limit)
+            select(self.model).where(*where).order_by(*ordering).offset(offset).limit(limit)
         )
         total = await session.scalar(select(func.count()).select_from(self.model).where(*where))
         return list(rows), total or 0
