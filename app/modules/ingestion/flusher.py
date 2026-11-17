@@ -60,7 +60,8 @@ class Flusher:
         self._clock = clock
         self._buffer: list[tuple[str, dict[str, Any]]] = []
         self._oldest: float | None = None
-        # First read this consumer's own unacknowledged entries (from before a restart).
+        # First read this consumer's own unacknowledged entries (from before a restart), by id
+        # from "0"; then switch to ">" (entries never delivered to anyone).
         self._read_from = "0"
         self._group_ready = False
 
@@ -94,8 +95,13 @@ class Flusher:
                 return 0
             raise
         entries = response[0][1] if response else []
-        if self._read_from == "0" and not entries:
-            self._read_from = ">"  # own backlog done; from now on, new entries only
+        if self._read_from != ">":
+            if not entries:
+                # Own backlog done (or there was none): from now on, new entries only.
+                self._read_from = ">"
+                return await self.poll(block_ms)
+            # Reading the backlog by id: continue after the last entry read.
+            self._read_from = entries[-1][0]
         for entry_id, fields in entries:
             if self._oldest is None:
                 self._oldest = self._clock()
@@ -112,25 +118,31 @@ class Flusher:
         """Writes the buffer, one file per partition, then acks. Returns the keys written."""
         if not self._buffer:
             return []
+        written = await self._write_files()
+        ids = [entry_id for entry_id, _ in self._buffer]
+        await self._ack(ids)
+        logger.info("Flushed %d events into %d file(s)", len(ids), len(written))
+        self._buffer, self._oldest = [], None
+        return written
+
+    async def _write_files(self) -> list[str]:
         partitions: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for _, event in self._buffer:
             timestamp = datetime.fromisoformat(event["timestamp"])
             partitions[partition_prefix(event["project_id"], timestamp)].append(to_row(event))
-
         written = []
         for prefix, rows in partitions.items():
             key = f"{prefix}/part-{uuid.uuid4().hex}.parquet"
             await self._storage.put(key, await asyncio.to_thread(to_parquet, rows))
             written.append(key)
+        return written
 
-        ids = [entry_id for entry_id, _ in self._buffer]
+    async def _ack(self, ids: list[str]) -> None:
+        """Only after every file is written: until then, the entries can be delivered again."""
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.xack(self._stream, GROUP, *ids)
             pipe.xdel(self._stream, *ids)  # acked entries are not needed in the stream any more
             await pipe.execute()
-        logger.info("Flushed %d events into %d file(s)", len(ids), len(written))
-        self._buffer, self._oldest = [], None
-        return written
 
     async def run_once(self, block_ms: int | None = None) -> list[str]:
         await self.poll(block_ms)
