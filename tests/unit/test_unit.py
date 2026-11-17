@@ -177,6 +177,14 @@ class TestSettings:
         "admin_api_key": "x" * 32,
     }
 
+    def test_empty_optional_values_mean_unset(self) -> None:
+        settings = Settings(**self.BASE, athena_database="", s3_bucket="", aws_region="")
+        assert (settings.athena_database, settings.s3_bucket, settings.aws_region) == (
+            None,
+            None,
+            None,
+        )
+
     def test_duckdb_needs_local_files_and_athena_needs_its_settings(self) -> None:
         with pytest.raises(ValidationError, match="QUERY_ENGINE=duckdb reads local files"):
             Settings(**self.BASE, storage_provider="s3", s3_bucket="b", aws_region="eu-west-1")

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     flush_max_events: int = Field(default=5000, gt=0)
     flush_max_seconds: float = Field(default=60, gt=0)
     flusher_name: str = Field(default="flusher-1", min_length=1)
+
+    @field_validator(
+        "s3_bucket", "aws_region", "athena_database", "athena_output_location", mode="before"
+    )
+    @classmethod
+    def empty_means_unset(cls, value: object) -> object:
+        """`ATHENA_DATABASE=` in a .env file means "not set", not an empty name."""
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def check_provider_settings(self) -> Self:
